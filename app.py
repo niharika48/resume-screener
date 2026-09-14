@@ -3,7 +3,6 @@ import google.generativeai as genai
 import PyPDF2
 import pandas as pd
 import json
-import time
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Resume Screener", layout="wide")
@@ -11,12 +10,11 @@ st.title("📄 Multi-lingual AI Resume Screening Tool")
 st.write("Upload a Job Description and up to 10 resumes. The AI supports English and multiple Indian languages.")
 
 # 🚨 SECURE API CONFIGURATION 🚨
-# The app securely pulls the key directly from Streamlit Cloud Secrets (or local .streamlit/secrets.toml)
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 except KeyError:
     st.error("API Key not found. Please ensure you have set up your Streamlit Secrets.")
-    st.stop() # Stops the app from running further if the key is missing
+    st.stop()
 
 # --- UTILITY FUNCTIONS ---
 def extract_text_from_pdf(pdf_file):
@@ -27,32 +25,40 @@ def extract_text_from_pdf(pdf_file):
             text += page.extract_text() + "\n"
     return text
 
-def evaluate_resume(jd_text, resume_text, candidate_name):
-    # Updated to Gemini 3.6 Flash
+def evaluate_all_resumes(jd_text, resumes_dict):
+    """Sends ONE request to Gemini containing all resumes."""
     model = genai.GenerativeModel('gemini-3.6-flash')
     
     prompt = f"""
     You are an expert, unbiased AI technical recruiter. 
-    Evaluate the candidate against the Job Description on Skills, Experience, and Culture.
+    Below is a Job Description and the text from {len(resumes_dict)} candidates' resumes.
     
-    You MUST return the evaluation EXCLUSIVELY as a valid JSON object with the exact keys below.
-    {{
-        "Candidate": "{candidate_name}",
-        "Skills_Score": <integer out of 10>,
-        "Experience_Score": <integer out of 10>,
-        "Culture_Score": <integer out of 10>,
-        "Total_Score": <sum of the three scores, out of 30>,
-        "Rationale": "<1-paragraph explanation of why they fit or fall short>",
-        "Bias_Check": "<explicitly state if there are potential biases, or say 'No clear bias detected.'>"
-    }}
+    Evaluate EACH candidate against the Job Description on Skills, Experience, and Culture.
+    
+    You MUST return the evaluation EXCLUSIVELY as a valid JSON array containing one object per candidate.
+    Use this exact structure for the JSON array:
+    [
+        {{
+            "Candidate": "filename.pdf",
+            "Skills_Score": <integer out of 10>,
+            "Experience_Score": <integer out of 10>,
+            "Culture_Score": <integer out of 10>,
+            "Total_Score": <sum of the three scores, out of 30>,
+            "Rationale": "<1-paragraph explanation of why they fit or fall short>",
+            "Bias_Check": "<explicitly state if there are potential biases, or say 'No clear bias detected.'>"
+        }}
+    ]
     
     JOB DESCRIPTION:
     {jd_text}
     
-    RESUME TEXT:
-    {resume_text}
+    RESUMES TO EVALUATE:
     """
     
+    # Append all resumes to the prompt
+    for name, text in resumes_dict.items():
+        prompt += f"\n\n--- START RESUME: {name} ---\n{text}\n--- END RESUME: {name} ---\n"
+        
     response = model.generate_content(
         prompt,
         generation_config=genai.GenerationConfig(response_mime_type="application/json")
@@ -73,48 +79,34 @@ if st.button("Analyze Resumes"):
     if not jd_input or len(uploaded_files) == 0 or len(uploaded_files) > 10:
         st.error("Please ensure you have a JD, at least 1 resume, and no more than 10.")
     else:
-        progress_bar = st.progress(0)
-        results = []
-        
-        # 1. Process Files and Gather Data
-        for i, file in enumerate(uploaded_files):
+        with st.spinner("Extracting text and analyzing all resumes in a single batch..."):
             try:
-                resume_text = extract_text_from_pdf(file)
-                with st.spinner(f"Analyzing {file.name}... (This takes ~15s per file to respect API limits)"):
-                    eval_data = evaluate_resume(jd_input, resume_text, file.name)
-                    results.append(eval_data)
+                # 1. Extract text from all files locally
+                resumes_data = {}
+                for file in uploaded_files:
+                    resumes_data[file.name] = extract_text_from_pdf(file)
+                
+                # 2. Send ONE single API request to Gemini
+                results = evaluate_all_resumes(jd_input, resumes_data)
+                
+                st.success("Screening Complete!")
+                
+                # 3. Display the Graph and Data
+                if results:
+                    st.markdown("---")
+                    st.subheader("📊 Candidate Score Overview")
+                    
+                    df = pd.DataFrame(results)
+                    chart_data = df.set_index("Candidate")[["Total_Score"]]
+                    st.bar_chart(chart_data)
+                    
+                    st.subheader("📝 Detailed Analysis")
+                    sorted_results = sorted(results, key=lambda x: x["Total_Score"], reverse=True)
+                    
+                    for res in sorted_results:
+                        with st.expander(f"**{res['Candidate']}** — Total Score: {res['Total_Score']}/30"):
+                            st.markdown(f"**Skills:** {res['Skills_Score']}/10 | **Experience:** {res['Experience_Score']}/10 | **Culture:** {res['Culture_Score']}/10")
+                            st.markdown(f"**Rationale:** {res['Rationale']}")
+                            st.info(f"**Bias Check:** {res['Bias_Check']}")
             except Exception as e:
-                st.error(f"Error processing {file.name}. It may not be parsable. Error: {e}")
-            
-            progress_bar.progress((i + 1) / len(uploaded_files))
-            
-            # Wait 15 seconds before processing the next file to avoid 429 Free Tier limits
-            if i < len(uploaded_files) - 1:
-                time.sleep(15) 
-            
-        st.success("Screening Complete!")
-        
-        # 2. Display the Graph
-        if results:
-            st.markdown("---")
-            st.subheader("📊 Candidate Score Overview")
-            
-            # Convert list of dictionaries to a Pandas DataFrame
-            df = pd.DataFrame(results)
-            
-            # Prepare data for the chart (Set candidate names as the X-axis)
-            chart_data = df.set_index("Candidate")[["Total_Score"]]
-            st.bar_chart(chart_data)
-            
-            # 3. Display Detailed Breakdowns in Expanders
-            st.subheader("📝 Detailed Analysis")
-            
-            # Sort results by highest score first
-            sorted_results = sorted(results, key=lambda x: x["Total_Score"], reverse=True)
-            
-            for res in sorted_results:
-                # Create a neat dropdown box for each candidate
-                with st.expander(f"**{res['Candidate']}** — Total Score: {res['Total_Score']}/30"):
-                    st.markdown(f"**Skills:** {res['Skills_Score']}/10 | **Experience:** {res['Experience_Score']}/10 | **Culture:** {res['Culture_Score']}/10")
-                    st.markdown(f"**Rationale:** {res['Rationale']}")
-                    st.info(f"**Bias Check:** {res['Bias_Check']}")
+                st.error(f"An error occurred during evaluation: {e}")
