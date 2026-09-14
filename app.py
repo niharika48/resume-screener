@@ -27,7 +27,7 @@ def extract_text_from_pdf(pdf_file):
 
 def evaluate_all_resumes(jd_text, resumes_dict):
     """Sends ONE request to Gemini containing all resumes."""
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-3.5-flash')
     
     prompt = f"""
     You are an expert, unbiased AI technical recruiter. 
