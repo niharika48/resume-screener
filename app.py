@@ -3,6 +3,7 @@ import google.generativeai as genai
 import PyPDF2
 import pandas as pd
 import json
+import time
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Resume Screener", layout="wide")
@@ -10,11 +11,11 @@ st.title("📄 Multi-lingual AI Resume Screening Tool")
 st.write("Upload a Job Description and up to 10 resumes. The AI supports English and multiple Indian languages.")
 
 # 🚨 SECURE API CONFIGURATION 🚨
-# The app now securely pulls the key directly from .streamlit/secrets.toml
+# The app securely pulls the key directly from Streamlit Cloud Secrets (or local .streamlit/secrets.toml)
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 except KeyError:
-    st.error("API Key not found. Please ensure you have set up your .streamlit/secrets.toml file.")
+    st.error("API Key not found. Please ensure you have set up your Streamlit Secrets.")
     st.stop() # Stops the app from running further if the key is missing
 
 # --- UTILITY FUNCTIONS ---
@@ -27,6 +28,7 @@ def extract_text_from_pdf(pdf_file):
     return text
 
 def evaluate_resume(jd_text, resume_text, candidate_name):
+    # Updated to Gemini 3.6 Flash
     model = genai.GenerativeModel('gemini-3.6-flash')
     
     prompt = f"""
@@ -74,31 +76,44 @@ if st.button("Analyze Resumes"):
         progress_bar = st.progress(0)
         results = []
         
+        # 1. Process Files and Gather Data
         for i, file in enumerate(uploaded_files):
             try:
                 resume_text = extract_text_from_pdf(file)
-                with st.spinner(f"Analyzing {file.name}..."):
+                with st.spinner(f"Analyzing {file.name}... (This takes ~15s per file to respect API limits)"):
                     eval_data = evaluate_resume(jd_input, resume_text, file.name)
                     results.append(eval_data)
             except Exception as e:
-                st.error(f"Error processing {file.name}. Error: {e}")
+                st.error(f"Error processing {file.name}. It may not be parsable. Error: {e}")
             
             progress_bar.progress((i + 1) / len(uploaded_files))
             
+            # Wait 15 seconds before processing the next file to avoid 429 Free Tier limits
+            if i < len(uploaded_files) - 1:
+                time.sleep(15) 
+            
         st.success("Screening Complete!")
         
+        # 2. Display the Graph
         if results:
             st.markdown("---")
             st.subheader("📊 Candidate Score Overview")
             
+            # Convert list of dictionaries to a Pandas DataFrame
             df = pd.DataFrame(results)
+            
+            # Prepare data for the chart (Set candidate names as the X-axis)
             chart_data = df.set_index("Candidate")[["Total_Score"]]
             st.bar_chart(chart_data)
             
+            # 3. Display Detailed Breakdowns in Expanders
             st.subheader("📝 Detailed Analysis")
+            
+            # Sort results by highest score first
             sorted_results = sorted(results, key=lambda x: x["Total_Score"], reverse=True)
             
             for res in sorted_results:
+                # Create a neat dropdown box for each candidate
                 with st.expander(f"**{res['Candidate']}** — Total Score: {res['Total_Score']}/30"):
                     st.markdown(f"**Skills:** {res['Skills_Score']}/10 | **Experience:** {res['Experience_Score']}/10 | **Culture:** {res['Culture_Score']}/10")
                     st.markdown(f"**Rationale:** {res['Rationale']}")
